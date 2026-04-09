@@ -1,0 +1,26 @@
+{
+  "name": "enyal-sdk",
+  "version": "2.0.0",
+  "description": "ENYAL SDK \u2014 encrypted knowledge graph, local memory, permanent proof",
+  "main": "index.js",
+  "engines": {
+    "node": ">=18.7.0"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.0.0"
+  },
+  "keywords": [
+    "enyal",
+    "knowledge-graph",
+    "zero-knowledge",
+    "archival",
+    "sdk"
+  ],
+  "license": "Apache-2.0",
+  "author": "Greenland AI Limited <info@enyal.ai>",
+  "homepage": "https://enyal.ai",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/JoulePAI/enyal-sdk-js.git"
+  }
+}
