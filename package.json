@@ -1,7 +1,7 @@
 {
-  "name": "enyal-sdk",
+  "name": "@enyalai/sdk",
   "version": "2.1.0",
-  "description": "ENYAL SDK \u2014 encrypted knowledge graph, local memory, permanent proof",
+  "description": "ENYAL SDK — encrypted knowledge graph, local memory, permanent proof",
   "type": "module",
   "main": "./dist/index.cjs",
   "exports": {
@@ -46,5 +46,8 @@
   "repository": {
     "type": "git",
     "url": "https://github.com/JoulePAI/enyal-sdk-js.git"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.0"
   }
 }
