@@ -2,6 +2,12 @@
 
 Your agent thinks locally. ENYAL proves permanently.
 
+## Installation
+
+```bash
+npm install @enyalai/sdk
+```
+
 ## Quick Start — Local Knowledge + Permanent Proof
 
 ```python
