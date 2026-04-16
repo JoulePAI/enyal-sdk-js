@@ -16,6 +16,8 @@
  * No external npm packages required for Shamir combine + WASM verification.
  */
 
+import crypto from 'node:crypto';
+
 // ────────────────────────────────────────────────────────────────
 // GF(256) Arithmetic — identical to enyal/shamir.py
 // Generator = 3, irreducible polynomial = 0x11B (same as AES)
@@ -196,9 +198,9 @@ function modPow(base, exp, mod) {
  * @param {string[]} chunkIds - chunk IDs to disclose
  * @param {string} purpose - disclosure purpose description
  */
-export async function requestClientDisclosure(apiKey, baseUrl, chunkIds, purpose) {
+export async function requestClientDisclosure(apiKey, baseUrl, chunkIds, purpose, { idempotencyKey, retry } = {}) {
     return _apiCall(apiKey, "POST", "/api/v1/disclose/client-side", {
-        body: { chunk_ids: chunkIds, purpose }, baseUrl,
+        body: { chunk_ids: chunkIds, purpose }, baseUrl, idempotencyKey, retry,
     });
 }
 
@@ -287,11 +289,11 @@ export async function verifyShareCombination(customerShare, custodialShare, pose
  * @param {string} [poseidonKeyHash] - optional, looked up from account if omitted
  * @returns {Promise<Object>} proof + share_attestation
  */
-export async function requestShareProof(apiKey, baseUrl, customerShareHex, poseidonKeyHash) {
+export async function requestShareProof(apiKey, baseUrl, customerShareHex, poseidonKeyHash, { idempotencyKey, retry } = {}) {
     const body = { customer_share_hex: customerShareHex };
     if (poseidonKeyHash) body.poseidon_key_hash = poseidonKeyHash;
     return _apiCall(apiKey, "POST", "/api/v1/prove/share-combination", {
-        body, baseUrl,
+        body, baseUrl, idempotencyKey, retry,
     });
 }
 
@@ -301,8 +303,59 @@ export async function requestShareProof(apiKey, baseUrl, customerShareHex, posei
 
 const DEFAULT_BASE_URL = "https://api.enyal.ai";
 
+// Maps API path → server-side idempotency field name.
+// Pattern A endpoints use client_chunk_id / client_attestation_id.
+// Pattern B endpoints use idempotency_key.
+const _IDEMPOTENCY_MAP = {
+    "/api/v1/archive":                { field: "client_chunk_id" },
+    "/api/v1/timestamp":              { field: "client_chunk_id" },
+    "/api/v1/agreement/create":       { field: "client_chunk_id" },
+    "/api/v1/compliance/attest":      { field: "client_attestation_id" },
+    "/api/v1/prove":                  { field: "idempotency_key" },
+    "/api/v1/prove-batch":            { field: "idempotency_key" },
+    "/api/v1/prove/share-combination": { field: "idempotency_key" },
+    "/api/v1/disclose":               { field: "idempotency_key" },
+    "/api/v1/disclose/client-side":   { field: "idempotency_key" },
+    "/api/v1/message/send":           { field: "idempotency_key" },
+};
+
+// Default retry policy
+const DEFAULT_MAX_RETRIES = 3;
+const DEFAULT_INITIAL_DELAY = 500;
+const DEFAULT_MAX_DELAY = 8000;
+const DEFAULT_BACKOFF_FACTOR = 2;
+const DEFAULT_JITTER_MIN = 100;
+const DEFAULT_JITTER_MAX = 300;
+
 /**
- * Shared HTTP helper. All ENYAL API calls route through here.
+ * Classify whether an error is retryable.
+ * Retries on: network errors (TypeError from fetch), 5xx, 429.
+ * Does NOT retry: 4xx (except 429), auth failures, client errors.
+ */
+function _isRetryable(err) {
+    // Network errors from fetch: TypeError with "fetch" or "network" in message
+    if (err instanceof TypeError) return true;
+    // HTTP errors encoded in our Error format: "API call failed (STATUS): ..."
+    const match = err.message?.match(/API call failed \((\d+)\)/);
+    if (match) {
+        const status = parseInt(match[1]);
+        return status === 429 || status >= 500;
+    }
+    return false;
+}
+
+/**
+ * Extract Retry-After header value from error message (429 responses).
+ * Returns delay in ms, or null if not present.
+ */
+function _getRetryAfterMs(err) {
+    // Our errors don't carry headers directly — return null.
+    // For 429, the default backoff delay applies.
+    return null;
+}
+
+/**
+ * Shared HTTP helper with retry + idempotency. All ENYAL API calls route through here.
  *
  * @param {string} apiKey - eyl_ API key
  * @param {string} method - HTTP method (GET, POST, etc.)
@@ -311,30 +364,72 @@ const DEFAULT_BASE_URL = "https://api.enyal.ai";
  * @param {Object} [opts.body] - Request body (POST/PUT)
  * @param {URLSearchParams|Object} [opts.params] - Query parameters (GET)
  * @param {string} [opts.baseUrl] - Base URL override
+ * @param {string} [opts.idempotencyKey] - Idempotency key (SDK translates to server field)
+ * @param {boolean} [opts.retry=true] - Set false to disable retries
+ * @param {number} [opts.maxRetries] - Override default max retries
  * @returns {Promise<Object>} Parsed JSON response
  */
 async function _apiCall(apiKey, method, path, {
     body = null, params = null, baseUrl = DEFAULT_BASE_URL,
+    idempotencyKey, retry = true, maxRetries = DEFAULT_MAX_RETRIES,
 } = {}) {
+    // Inject idempotency key — resolved once, stable across retries
+    const idemMapping = _IDEMPOTENCY_MAP[path];
+    if (idemMapping && method === "POST") {
+        const resolvedKey = idempotencyKey || crypto.randomUUID();
+        if (body === null) body = {};
+        body[idemMapping.field] = resolvedKey;
+    }
+
     let url = `${baseUrl}${path}`;
     if (params) {
         const qs = params instanceof URLSearchParams ? params : new URLSearchParams(params);
         url = `${url}?${qs}`;
     }
 
-    const headers = { "X-API-Key": apiKey };
-    const fetchOpts = { method, headers };
-    if (body !== null) {
-        headers["Content-Type"] = "application/json";
-        fetchOpts.body = JSON.stringify(body);
+    const attempts = retry ? maxRetries + 1 : 1;
+    let lastErr;
+
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+        try {
+            // Fresh fetch per attempt (new response object each time)
+            const headers = { "X-API-Key": apiKey };
+            const fetchOpts = { method, headers };
+            if (body !== null) {
+                headers["Content-Type"] = "application/json";
+                fetchOpts.body = JSON.stringify(body);
+            }
+
+            const resp = await fetch(url, fetchOpts);
+            if (!resp.ok) {
+                const e = await resp.json().catch(() => ({}));
+                const err = new Error(`API call failed (${resp.status}): ${e.detail || resp.statusText}`);
+                err.status = resp.status;
+                err.retryAfter = resp.headers?.get?.("Retry-After");
+                throw err;
+            }
+            return resp.json();
+        } catch (err) {
+            lastErr = err;
+            if (!retry || attempt === attempts || !_isRetryable(err)) break;
+
+            // Exponential backoff with jitter
+            let delay = Math.min(
+                DEFAULT_INITIAL_DELAY * (DEFAULT_BACKOFF_FACTOR ** (attempt - 1)),
+                DEFAULT_MAX_DELAY
+            );
+            // Respect Retry-After header on 429
+            if (err.retryAfter) {
+                const ra = parseFloat(err.retryAfter) * 1000;
+                if (!isNaN(ra)) delay = Math.min(ra, DEFAULT_MAX_DELAY);
+            }
+            delay += DEFAULT_JITTER_MIN + Math.random() * (DEFAULT_JITTER_MAX - DEFAULT_JITTER_MIN);
+
+            await new Promise(r => setTimeout(r, delay));
+        }
     }
 
-    const resp = await fetch(url, fetchOpts);
-    if (!resp.ok) {
-        const e = await resp.json().catch(() => ({}));
-        throw new Error(`API call failed (${resp.status}): ${e.detail || resp.statusText}`);
-    }
-    return resp.json();
+    throw lastErr;
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -344,12 +439,12 @@ async function _apiCall(apiKey, method, path, {
 /**
  * Archive to ENYAL's immutable ledger.
  * @param {string} apiKey - eyl_ API key
- * @param {Object} opts - { agentId, chunkType, chunkKey, data, metadata?, baseUrl? }
+ * @param {Object} opts - { agentId, chunkType, chunkKey, data, metadata?, baseUrl?, idempotencyKey?, retry? }
  */
-export async function archive(apiKey, { agentId, chunkType, chunkKey, data, metadata = {}, baseUrl = DEFAULT_BASE_URL }) {
+export async function archive(apiKey, { agentId, chunkType, chunkKey, data, metadata = {}, baseUrl = DEFAULT_BASE_URL, idempotencyKey, retry }) {
     return _apiCall(apiKey, "POST", "/api/v1/archive", {
         body: { agent_id: agentId, chunk_type: chunkType, chunk_key: chunkKey, data, ...metadata },
-        baseUrl,
+        baseUrl, idempotencyKey, retry,
     });
 }
 
@@ -372,23 +467,23 @@ export async function search(apiKey, { query, chunkType, entity, since, until, l
 /**
  * Generate a ZK proof of archived intelligence.
  * @param {string} apiKey
- * @param {Object} opts - { resourceType, geographicRegion?, quantumResistant?, baseUrl? }
+ * @param {Object} opts - { resourceType, geographicRegion?, quantumResistant?, baseUrl?, idempotencyKey?, retry? }
  */
-export async function prove(apiKey, { resourceType, geographicRegion, quantumResistant = false, baseUrl = DEFAULT_BASE_URL }) {
+export async function prove(apiKey, { resourceType, geographicRegion, quantumResistant = false, baseUrl = DEFAULT_BASE_URL, idempotencyKey, retry }) {
     const body = { resource_type: resourceType, quantum_resistant: quantumResistant };
     if (geographicRegion) body.geographic_region = geographicRegion;
-    return _apiCall(apiKey, "POST", "/api/v1/prove", { body, baseUrl });
+    return _apiCall(apiKey, "POST", "/api/v1/prove", { body, baseUrl, idempotencyKey, retry });
 }
 
 /**
  * Server-side disclosure — re-encrypts chunks for a recipient.
  * @param {string} apiKey
- * @param {Object} opts - { chunkIds, recipientPubkeyHex, purpose, includeContentProof?, proofHashType?, baseUrl? }
+ * @param {Object} opts - { chunkIds, recipientPubkeyHex, purpose, includeContentProof?, proofHashType?, baseUrl?, idempotencyKey?, retry? }
  */
-export async function disclose(apiKey, { chunkIds, recipientPubkeyHex, purpose, includeContentProof = false, proofHashType = "poseidon", baseUrl = DEFAULT_BASE_URL }) {
+export async function disclose(apiKey, { chunkIds, recipientPubkeyHex, purpose, includeContentProof = false, proofHashType = "poseidon", baseUrl = DEFAULT_BASE_URL, idempotencyKey, retry }) {
     return _apiCall(apiKey, "POST", "/api/v1/disclose", {
         body: { chunk_ids: chunkIds, recipient_pubkey_hex: recipientPubkeyHex, purpose, include_content_proof: includeContentProof, proof_hash_type: proofHashType },
-        baseUrl,
+        baseUrl, idempotencyKey, retry,
     });
 }
 
@@ -399,23 +494,23 @@ export async function disclose(apiKey, { chunkIds, recipientPubkeyHex, purpose, 
 /**
  * Timestamp anchored to ENYAL's immutable ledger.
  * @param {string} apiKey
- * @param {Object} opts - { payload, description?, baseUrl? }
+ * @param {Object} opts - { payload, description?, baseUrl?, idempotencyKey?, retry? }
  */
-export async function timestamp(apiKey, { payload, description, baseUrl = DEFAULT_BASE_URL }) {
+export async function timestamp(apiKey, { payload, description, baseUrl = DEFAULT_BASE_URL, idempotencyKey, retry }) {
     const body = { payload };
     if (description) body.description = description;
-    return _apiCall(apiKey, "POST", "/api/v1/timestamp", { body, baseUrl });
+    return _apiCall(apiKey, "POST", "/api/v1/timestamp", { body, baseUrl, idempotencyKey, retry });
 }
 
 /**
  * Create a multi-party agreement anchored to ENYAL's immutable ledger.
  * @param {string} apiKey
- * @param {Object} opts - { terms, parties, title?, baseUrl? }
+ * @param {Object} opts - { terms, parties, title?, baseUrl?, idempotencyKey?, retry? }
  */
-export async function createAgreement(apiKey, { terms, parties, title, baseUrl = DEFAULT_BASE_URL }) {
+export async function createAgreement(apiKey, { terms, parties, title, baseUrl = DEFAULT_BASE_URL, idempotencyKey, retry }) {
     const body = { terms, parties };
     if (title) body.title = title;
-    return _apiCall(apiKey, "POST", "/api/v1/agreement/create", { body, baseUrl });
+    return _apiCall(apiKey, "POST", "/api/v1/agreement/create", { body, baseUrl, idempotencyKey, retry });
 }
 
 /**
@@ -441,12 +536,12 @@ export async function getLineage(apiKey, { chunkId, baseUrl = DEFAULT_BASE_URL }
 /**
  * Generate a compliance attestation report.
  * @param {string} apiKey
- * @param {Object} opts - { periodStart, periodEnd, systems, baseUrl? }
+ * @param {Object} opts - { periodStart, periodEnd, systems, baseUrl?, idempotencyKey?, retry? }
  */
-export async function complianceAttest(apiKey, { periodStart, periodEnd, systems, baseUrl = DEFAULT_BASE_URL }) {
+export async function complianceAttest(apiKey, { periodStart, periodEnd, systems, baseUrl = DEFAULT_BASE_URL, idempotencyKey, retry }) {
     return _apiCall(apiKey, "POST", "/api/v1/compliance/attest", {
         body: { period_start: periodStart, period_end: periodEnd, systems },
-        baseUrl,
+        baseUrl, idempotencyKey, retry,
     });
 }
 
@@ -457,12 +552,12 @@ export async function complianceAttest(apiKey, { periodStart, periodEnd, systems
 /**
  * Send an agent-to-agent message. Cost: 10 joules.
  * @param {string} apiKey - eyl_ API key
- * @param {Object} opts - { senderAgentId, threadId, recipientAgentId, messageType, payload, expiresAt?, baseUrl? }
+ * @param {Object} opts - { senderAgentId, threadId, recipientAgentId, messageType, payload, expiresAt?, baseUrl?, idempotencyKey?, retry? }
  */
-export async function sendMessage(apiKey, { senderAgentId, threadId, recipientAgentId, messageType, payload, expiresAt, baseUrl = DEFAULT_BASE_URL }) {
+export async function sendMessage(apiKey, { senderAgentId, threadId, recipientAgentId, messageType, payload, expiresAt, baseUrl = DEFAULT_BASE_URL, idempotencyKey, retry }) {
     const body = { sender_agent_id: senderAgentId, thread_id: threadId, recipient_agent_id: recipientAgentId, message_type: messageType, payload };
     if (expiresAt) body.expires_at = expiresAt;
-    return _apiCall(apiKey, "POST", "/api/v1/message/send", { body, baseUrl });
+    return _apiCall(apiKey, "POST", "/api/v1/message/send", { body, baseUrl, idempotencyKey, retry });
 }
 
 /**
@@ -538,17 +633,17 @@ export async function getKnowledgeHealth(apiKey, { baseUrl = DEFAULT_BASE_URL } 
 
 /**
  * Combine multiple knowledge nodes into a synthesis. Cost: 5 joules.
- * Creates a new 'synthesis' node with 'informed_by' edges to each source.
- * @param {string} apiKey
- * @param {Object} options
- * @param {string} options.query - Synthesis question (max 500 chars)
- * @param {string[]} options.nodeIds - 1-20 node UUIDs to synthesise
- * @returns {Promise<{id, name, node_type, summary, source_nodes, edges_created, cost}>}
+ *
+ * NOTE: This endpoint requires password-session auth (web console / mobile app).
+ * It cannot be called via API key. Use the ENYAL web console at enyal.ai instead.
+ *
+ * @throws {Error} Always — this endpoint is not available via API key auth.
  */
-export async function synthesiseKnowledge(apiKey, { query, nodeIds, baseUrl = DEFAULT_BASE_URL }) {
-    return _apiCall(apiKey, "POST", "/api/v1/knowledge/synthesise", {
-        body: { query, node_ids: nodeIds }, baseUrl,
-    });
+export async function synthesiseKnowledge(apiKey, opts = {}) {
+    throw new Error(
+        "knowledge/synthesise requires session auth (not API key). " +
+        "Use the ENYAL web console at enyal.ai or the mobile app."
+    );
 }
 
 // ────────────────────────────────────────────────────────────────

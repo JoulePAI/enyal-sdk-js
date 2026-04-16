@@ -466,7 +466,7 @@ module.exports = __toCommonJS(index_exports);
 
 // enyal_agent.js
 init_local_knowledge();
-var import_node_crypto2 = __toESM(require("node:crypto"), 1);
+var import_node_crypto3 = __toESM(require("node:crypto"), 1);
 
 // enyal-client.js
 var enyal_client_exports = {};
@@ -504,6 +504,7 @@ __export(enyal_client_exports, {
   verifyAgreement: () => verifyAgreement,
   verifyShareCombination: () => verifyShareCombination
 });
+var import_node_crypto2 = __toESM(require("node:crypto"), 1);
 var GF256_EXP = new Uint8Array(512);
 var GF256_LOG = new Uint8Array(256);
 (function initGF256() {
@@ -565,22 +566,22 @@ function base64ToBytes(b64) {
 }
 async function memoryKDF(sharedSecret) {
   const salt = new Uint8Array(32);
-  const prkKey = await crypto.subtle.importKey("raw", salt, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-  const prk = new Uint8Array(await crypto.subtle.sign("HMAC", prkKey, sharedSecret));
-  const okmKey = await crypto.subtle.importKey("raw", prk, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const prkKey = await import_node_crypto2.default.subtle.importKey("raw", salt, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const prk = new Uint8Array(await import_node_crypto2.default.subtle.sign("HMAC", prkKey, sharedSecret));
+  const okmKey = await import_node_crypto2.default.subtle.importKey("raw", prk, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
   const context = new TextEncoder().encode("joulepai-memory-v1");
   const info = new Uint8Array(context.length + 1);
   info.set(context);
   info[context.length] = 1;
-  return new Uint8Array(await crypto.subtle.sign("HMAC", okmKey, info));
+  return new Uint8Array(await import_node_crypto2.default.subtle.sign("HMAC", okmKey, info));
 }
 async function aesGcmDecrypt(keyBytes, iv, ciphertext, tag) {
-  const aesKey = await crypto.subtle.importKey("raw", keyBytes, { name: "AES-GCM" }, false, ["decrypt"]);
+  const aesKey = await import_node_crypto2.default.subtle.importKey("raw", keyBytes, { name: "AES-GCM" }, false, ["decrypt"]);
   const ctWithTag = new Uint8Array(ciphertext.length + tag.length);
   ctWithTag.set(ciphertext);
   ctWithTag.set(tag, ciphertext.length);
   try {
-    const plaintext = await crypto.subtle.decrypt(
+    const plaintext = await import_node_crypto2.default.subtle.decrypt(
       { name: "AES-GCM", iv, tagLength: 128 },
       aesKey,
       ctWithTag
@@ -626,10 +627,12 @@ function modPow(base, exp, mod) {
   }
   return result;
 }
-async function requestClientDisclosure(apiKey, baseUrl, chunkIds, purpose) {
+async function requestClientDisclosure(apiKey, baseUrl, chunkIds, purpose, { idempotencyKey, retry } = {}) {
   return _apiCall(apiKey, "POST", "/api/v1/disclose/client-side", {
     body: { chunk_ids: chunkIds, purpose },
-    baseUrl
+    baseUrl,
+    idempotencyKey,
+    retry
   });
 }
 async function decryptCustodialShare(encryptedShare, customerPrivateKeyBytes, p256ScalarMul) {
@@ -662,42 +665,105 @@ async function verifyShareCombination(customerShare, custodialShare, poseidonKey
   );
   return JSON.parse(result);
 }
-async function requestShareProof(apiKey, baseUrl, customerShareHex, poseidonKeyHash) {
+async function requestShareProof(apiKey, baseUrl, customerShareHex, poseidonKeyHash, { idempotencyKey, retry } = {}) {
   const body = { customer_share_hex: customerShareHex };
   if (poseidonKeyHash) body.poseidon_key_hash = poseidonKeyHash;
   return _apiCall(apiKey, "POST", "/api/v1/prove/share-combination", {
     body,
-    baseUrl
+    baseUrl,
+    idempotencyKey,
+    retry
   });
 }
 var DEFAULT_BASE_URL = "https://api.enyal.ai";
+var _IDEMPOTENCY_MAP = {
+  "/api/v1/archive": { field: "client_chunk_id" },
+  "/api/v1/timestamp": { field: "client_chunk_id" },
+  "/api/v1/agreement/create": { field: "client_chunk_id" },
+  "/api/v1/compliance/attest": { field: "client_attestation_id" },
+  "/api/v1/prove": { field: "idempotency_key" },
+  "/api/v1/prove-batch": { field: "idempotency_key" },
+  "/api/v1/prove/share-combination": { field: "idempotency_key" },
+  "/api/v1/disclose": { field: "idempotency_key" },
+  "/api/v1/disclose/client-side": { field: "idempotency_key" },
+  "/api/v1/message/send": { field: "idempotency_key" }
+};
+var DEFAULT_MAX_RETRIES = 3;
+var DEFAULT_INITIAL_DELAY = 500;
+var DEFAULT_MAX_DELAY = 8e3;
+var DEFAULT_BACKOFF_FACTOR = 2;
+var DEFAULT_JITTER_MIN = 100;
+var DEFAULT_JITTER_MAX = 300;
+function _isRetryable(err) {
+  if (err instanceof TypeError) return true;
+  const match = err.message?.match(/API call failed \((\d+)\)/);
+  if (match) {
+    const status = parseInt(match[1]);
+    return status === 429 || status >= 500;
+  }
+  return false;
+}
 async function _apiCall(apiKey, method, path2, {
   body = null,
   params = null,
-  baseUrl = DEFAULT_BASE_URL
+  baseUrl = DEFAULT_BASE_URL,
+  idempotencyKey,
+  retry = true,
+  maxRetries = DEFAULT_MAX_RETRIES
 } = {}) {
+  const idemMapping = _IDEMPOTENCY_MAP[path2];
+  if (idemMapping && method === "POST") {
+    const resolvedKey = idempotencyKey || import_node_crypto2.default.randomUUID();
+    if (body === null) body = {};
+    body[idemMapping.field] = resolvedKey;
+  }
   let url = `${baseUrl}${path2}`;
   if (params) {
     const qs = params instanceof URLSearchParams ? params : new URLSearchParams(params);
     url = `${url}?${qs}`;
   }
-  const headers = { "X-API-Key": apiKey };
-  const fetchOpts = { method, headers };
-  if (body !== null) {
-    headers["Content-Type"] = "application/json";
-    fetchOpts.body = JSON.stringify(body);
+  const attempts = retry ? maxRetries + 1 : 1;
+  let lastErr;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      const headers = { "X-API-Key": apiKey };
+      const fetchOpts = { method, headers };
+      if (body !== null) {
+        headers["Content-Type"] = "application/json";
+        fetchOpts.body = JSON.stringify(body);
+      }
+      const resp = await fetch(url, fetchOpts);
+      if (!resp.ok) {
+        const e = await resp.json().catch(() => ({}));
+        const err = new Error(`API call failed (${resp.status}): ${e.detail || resp.statusText}`);
+        err.status = resp.status;
+        err.retryAfter = resp.headers?.get?.("Retry-After");
+        throw err;
+      }
+      return resp.json();
+    } catch (err) {
+      lastErr = err;
+      if (!retry || attempt === attempts || !_isRetryable(err)) break;
+      let delay = Math.min(
+        DEFAULT_INITIAL_DELAY * DEFAULT_BACKOFF_FACTOR ** (attempt - 1),
+        DEFAULT_MAX_DELAY
+      );
+      if (err.retryAfter) {
+        const ra = parseFloat(err.retryAfter) * 1e3;
+        if (!isNaN(ra)) delay = Math.min(ra, DEFAULT_MAX_DELAY);
+      }
+      delay += DEFAULT_JITTER_MIN + Math.random() * (DEFAULT_JITTER_MAX - DEFAULT_JITTER_MIN);
+      await new Promise((r) => setTimeout(r, delay));
+    }
   }
-  const resp = await fetch(url, fetchOpts);
-  if (!resp.ok) {
-    const e = await resp.json().catch(() => ({}));
-    throw new Error(`API call failed (${resp.status}): ${e.detail || resp.statusText}`);
-  }
-  return resp.json();
+  throw lastErr;
 }
-async function archive(apiKey, { agentId, chunkType, chunkKey, data, metadata = {}, baseUrl = DEFAULT_BASE_URL }) {
+async function archive(apiKey, { agentId, chunkType, chunkKey, data, metadata = {}, baseUrl = DEFAULT_BASE_URL, idempotencyKey, retry }) {
   return _apiCall(apiKey, "POST", "/api/v1/archive", {
     body: { agent_id: agentId, chunk_type: chunkType, chunk_key: chunkKey, data, ...metadata },
-    baseUrl
+    baseUrl,
+    idempotencyKey,
+    retry
   });
 }
 async function search(apiKey, { query, chunkType, entity, since, until, limit = 20, baseUrl = DEFAULT_BASE_URL }) {
@@ -710,26 +776,28 @@ async function search(apiKey, { query, chunkType, entity, since, until, limit = 
   params.set("limit", limit);
   return _apiCall(apiKey, "GET", "/api/v1/search", { params, baseUrl });
 }
-async function prove(apiKey, { resourceType, geographicRegion, quantumResistant = false, baseUrl = DEFAULT_BASE_URL }) {
+async function prove(apiKey, { resourceType, geographicRegion, quantumResistant = false, baseUrl = DEFAULT_BASE_URL, idempotencyKey, retry }) {
   const body = { resource_type: resourceType, quantum_resistant: quantumResistant };
   if (geographicRegion) body.geographic_region = geographicRegion;
-  return _apiCall(apiKey, "POST", "/api/v1/prove", { body, baseUrl });
+  return _apiCall(apiKey, "POST", "/api/v1/prove", { body, baseUrl, idempotencyKey, retry });
 }
-async function disclose(apiKey, { chunkIds, recipientPubkeyHex, purpose, includeContentProof = false, proofHashType = "poseidon", baseUrl = DEFAULT_BASE_URL }) {
+async function disclose(apiKey, { chunkIds, recipientPubkeyHex, purpose, includeContentProof = false, proofHashType = "poseidon", baseUrl = DEFAULT_BASE_URL, idempotencyKey, retry }) {
   return _apiCall(apiKey, "POST", "/api/v1/disclose", {
     body: { chunk_ids: chunkIds, recipient_pubkey_hex: recipientPubkeyHex, purpose, include_content_proof: includeContentProof, proof_hash_type: proofHashType },
-    baseUrl
+    baseUrl,
+    idempotencyKey,
+    retry
   });
 }
-async function timestamp(apiKey, { payload, description, baseUrl = DEFAULT_BASE_URL }) {
+async function timestamp(apiKey, { payload, description, baseUrl = DEFAULT_BASE_URL, idempotencyKey, retry }) {
   const body = { payload };
   if (description) body.description = description;
-  return _apiCall(apiKey, "POST", "/api/v1/timestamp", { body, baseUrl });
+  return _apiCall(apiKey, "POST", "/api/v1/timestamp", { body, baseUrl, idempotencyKey, retry });
 }
-async function createAgreement(apiKey, { terms, parties, title, baseUrl = DEFAULT_BASE_URL }) {
+async function createAgreement(apiKey, { terms, parties, title, baseUrl = DEFAULT_BASE_URL, idempotencyKey, retry }) {
   const body = { terms, parties };
   if (title) body.title = title;
-  return _apiCall(apiKey, "POST", "/api/v1/agreement/create", { body, baseUrl });
+  return _apiCall(apiKey, "POST", "/api/v1/agreement/create", { body, baseUrl, idempotencyKey, retry });
 }
 async function verifyAgreement(apiKey, { agreementChunkId, terms, baseUrl = DEFAULT_BASE_URL }) {
   return _apiCall(apiKey, "POST", "/api/v1/agreement/verify", {
@@ -740,16 +808,18 @@ async function verifyAgreement(apiKey, { agreementChunkId, terms, baseUrl = DEFA
 async function getLineage(apiKey, { chunkId, baseUrl = DEFAULT_BASE_URL }) {
   return _apiCall(apiKey, "GET", `/api/v1/lineage/${chunkId}`, { baseUrl });
 }
-async function complianceAttest(apiKey, { periodStart, periodEnd, systems, baseUrl = DEFAULT_BASE_URL }) {
+async function complianceAttest(apiKey, { periodStart, periodEnd, systems, baseUrl = DEFAULT_BASE_URL, idempotencyKey, retry }) {
   return _apiCall(apiKey, "POST", "/api/v1/compliance/attest", {
     body: { period_start: periodStart, period_end: periodEnd, systems },
-    baseUrl
+    baseUrl,
+    idempotencyKey,
+    retry
   });
 }
-async function sendMessage(apiKey, { senderAgentId, threadId, recipientAgentId, messageType, payload, expiresAt, baseUrl = DEFAULT_BASE_URL }) {
+async function sendMessage(apiKey, { senderAgentId, threadId, recipientAgentId, messageType, payload, expiresAt, baseUrl = DEFAULT_BASE_URL, idempotencyKey, retry }) {
   const body = { sender_agent_id: senderAgentId, thread_id: threadId, recipient_agent_id: recipientAgentId, message_type: messageType, payload };
   if (expiresAt) body.expires_at = expiresAt;
-  return _apiCall(apiKey, "POST", "/api/v1/message/send", { body, baseUrl });
+  return _apiCall(apiKey, "POST", "/api/v1/message/send", { body, baseUrl, idempotencyKey, retry });
 }
 async function getInbox(apiKey, { agentId, direction = "inbox", threadId, messageType, since, limit = 20, baseUrl = DEFAULT_BASE_URL }) {
   const params = new URLSearchParams({ agent_id: agentId, direction, limit });
@@ -795,11 +865,10 @@ async function getKnowledgeIndex(apiKey, { baseUrl = DEFAULT_BASE_URL } = {}) {
 async function getKnowledgeHealth(apiKey, { baseUrl = DEFAULT_BASE_URL } = {}) {
   return _apiCall(apiKey, "GET", "/api/v1/knowledge/health", { baseUrl });
 }
-async function synthesiseKnowledge(apiKey, { query, nodeIds, baseUrl = DEFAULT_BASE_URL }) {
-  return _apiCall(apiKey, "POST", "/api/v1/knowledge/synthesise", {
-    body: { query, node_ids: nodeIds },
-    baseUrl
-  });
+async function synthesiseKnowledge(apiKey, opts = {}) {
+  throw new Error(
+    "knowledge/synthesise requires session auth (not API key). Use the ENYAL web console at enyal.ai or the mobile app."
+  );
 }
 
 // enyal_agent.js
@@ -1007,10 +1076,10 @@ var EnyalAgent = class {
       exported_at: (/* @__PURE__ */ new Date()).toISOString()
     };
     const plaintext = Buffer.from(JSON.stringify(snapshot));
-    const plaintextHash = import_node_crypto2.default.createHash("sha256").update(plaintext).digest("hex");
+    const plaintextHash = import_node_crypto3.default.createHash("sha256").update(plaintext).digest("hex");
     const key = this._deriveSnapshotKey(password);
-    const iv = import_node_crypto2.default.randomBytes(12);
-    const cipher = import_node_crypto2.default.createCipheriv("aes-256-gcm", key, iv);
+    const iv = import_node_crypto3.default.randomBytes(12);
+    const cipher = import_node_crypto3.default.createCipheriv("aes-256-gcm", key, iv);
     const encrypted = Buffer.concat([cipher.update(plaintext), cipher.final()]);
     const tag = cipher.getAuthTag();
     const blob = Buffer.concat([iv, encrypted, tag]).toString("base64");
@@ -1068,7 +1137,7 @@ var EnyalAgent = class {
       const iv = blob.subarray(0, 12);
       const tag = blob.subarray(blob.length - 16);
       const ciphertext = blob.subarray(12, blob.length - 16);
-      const decipher = import_node_crypto2.default.createDecipheriv("aes-256-gcm", key, iv);
+      const decipher = import_node_crypto3.default.createDecipheriv("aes-256-gcm", key, iv);
       decipher.setAuthTag(tag);
       let plaintext;
       try {
@@ -1078,7 +1147,7 @@ var EnyalAgent = class {
         throw new Error("Decryption failed. Wrong password or corrupted snapshot.");
       }
       if (data.plaintext_hash) {
-        const hash = import_node_crypto2.default.createHash("sha256").update(plaintext).digest("hex");
+        const hash = import_node_crypto3.default.createHash("sha256").update(plaintext).digest("hex");
         if (hash !== data.plaintext_hash) {
           throw new Error("Snapshot integrity check failed \u2014 data may have been tampered with");
         }
@@ -1242,8 +1311,8 @@ var EnyalAgent = class {
    * Must match Python SDK's _derive_snapshot_key exactly.
    */
   _deriveSnapshotKey(password) {
-    const accountSalt = import_node_crypto2.default.createHash("sha256").update(this.apiKey).digest("hex").slice(0, 16);
-    return Buffer.from(import_node_crypto2.default.hkdfSync(
+    const accountSalt = import_node_crypto3.default.createHash("sha256").update(this.apiKey).digest("hex").slice(0, 16);
+    return Buffer.from(import_node_crypto3.default.hkdfSync(
       "sha256",
       Buffer.from(password),
       Buffer.from(`enyal-knowledge-snapshot:${accountSalt}`),

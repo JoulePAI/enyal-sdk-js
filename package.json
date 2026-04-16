@@ -1,6 +1,6 @@
 {
   "name": "enyal-sdk",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "ENYAL SDK \u2014 encrypted knowledge graph, local memory, permanent proof",
   "type": "module",
   "main": "./dist/index.cjs",

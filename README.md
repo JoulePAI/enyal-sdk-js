@@ -48,6 +48,34 @@ agent.sync_to_enyal()
 agent.sync_from_enyal()
 ```
 
+## Retry Safety
+
+All state-changing API calls automatically retry on network errors, timeouts, 5xx, and 429 (rate limit) responses. Retries use exponential backoff with jitter and a deterministic idempotency key to prevent double-charges.
+
+```js
+// Automatic retry with SDK-generated idempotency key (default)
+await archive(apiKey, {
+    agentId: 'my-agent', chunkType: 'decision_record',
+    chunkKey: 'my-agent:decision:001', data: { decision: 'Invest in space' },
+});
+
+// Explicit idempotency key
+await archive(apiKey, {
+    agentId: 'my-agent', chunkType: 'decision_record',
+    chunkKey: 'my-agent:decision:001', data: { decision: 'Invest in space' },
+    idempotencyKey: 'my-dedup-key-12345678901234567890',
+});
+
+// Disable retry for a single call
+await archive(apiKey, { ..., retry: false });
+```
+
+**Default retry policy:** 3 retries, 500ms initial delay, 2x backoff, 8s max delay, 100-300ms jitter. Respects `Retry-After` header on 429 responses. Never retries 4xx errors (except 429).
+
+**Retry-safe endpoints:** archive, prove, disclose, client-side disclose, share-proof, timestamp, agreement/create, compliance/attest, message/send.
+
+**Not available via SDK:** `knowledge/synthesise` requires session auth (web console only).
+
 ## Two Layers
 
 | Feature | Local (free) | ENYAL (paid) |
