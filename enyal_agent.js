@@ -1,9 +1,7 @@
-'use strict';
-
 /**
  * EnyalAgent — local brain + permanent proof in one interface.
  *
- *   const { EnyalAgent } = require('enyal-sdk');
+ *   import { EnyalAgent } from 'enyal-sdk';
  *   const agent = new EnyalAgent('eyl_xxx');
  *
  *   // Local (free, private, instant)
@@ -20,20 +18,11 @@
  * Dependencies: better-sqlite3
  */
 
-const { LocalKnowledgeGraph } = require('./local_knowledge');
-const crypto = require('crypto');
-
-// Lazy-load the remote client — SDK works locally without it.
-// enyal-client.js may use ESM exports; try require first, fall back to null.
-let enyal;
-try {
-    enyal = require('./enyal-client');
-} catch {
-    enyal = null;
-}
+import { LocalKnowledgeGraph } from './local_knowledge.js';
+import crypto from 'node:crypto';
+import * as enyal from './enyal-client.js';
 
 function requireClient() {
-    if (!enyal) throw new Error('Remote methods require enyal-client.js');
     return enyal;
 }
 
@@ -582,4 +571,4 @@ class EnyalAgent {
     }
 }
 
-module.exports = { EnyalAgent };
+export { EnyalAgent };

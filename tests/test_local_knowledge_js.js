@@ -1,5 +1,3 @@
-'use strict';
-
 /**
  * Tests for ENYAL JS SDK — local knowledge graph + EnyalAgent.
  *
@@ -22,15 +20,15 @@
  * T21. Natural language remember (fallback, no Ollama)
  * T22. _hash matches Python output for same input
  *
- * Run: node test_local_knowledge_js.js
+ * Run: node tests/test_local_knowledge_js.js
  */
 
-const { LocalKnowledgeGraph } = require('./local_knowledge');
-const { EnyalAgent } = require('./enyal_agent');
-const path = require('path');
-const fs = require('fs');
-const os = require('os');
-const crypto = require('crypto');
+import { LocalKnowledgeGraph } from '../local_knowledge.js';
+import { EnyalAgent } from '../enyal_agent.js';
+import path from 'node:path';
+import fs from 'node:fs';
+import os from 'node:os';
+import crypto from 'node:crypto';
 
 let passed = 0;
 let failed = 0;

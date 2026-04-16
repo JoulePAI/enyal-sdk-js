@@ -1,6 +1,3 @@
-'use strict';
-
-const { EnyalAgent } = require('./enyal_agent');
-const { LocalKnowledgeGraph } = require('./local_knowledge');
-
-module.exports = { EnyalAgent, LocalKnowledgeGraph };
+export { EnyalAgent } from './enyal_agent.js';
+export { LocalKnowledgeGraph } from './local_knowledge.js';
+export * from './enyal-client.js';

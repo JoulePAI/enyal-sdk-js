@@ -197,16 +197,9 @@ function modPow(base, exp, mod) {
  * @param {string} purpose - disclosure purpose description
  */
 export async function requestClientDisclosure(apiKey, baseUrl, chunkIds, purpose) {
-    const resp = await fetch(`${baseUrl}/api/v1/disclose/client-side`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-API-Key": apiKey },
-        body: JSON.stringify({ chunk_ids: chunkIds, purpose }),
+    return _apiCall(apiKey, "POST", "/api/v1/disclose/client-side", {
+        body: { chunk_ids: chunkIds, purpose }, baseUrl,
     });
-    if (!resp.ok) {
-        const err = await resp.json().catch(() => ({ detail: resp.statusText }));
-        throw new Error(`Disclosure failed (${resp.status}): ${err.detail || JSON.stringify(err)}`);
-    }
-    return resp.json();
 }
 
 /**
@@ -297,15 +290,49 @@ export async function verifyShareCombination(customerShare, custodialShare, pose
 export async function requestShareProof(apiKey, baseUrl, customerShareHex, poseidonKeyHash) {
     const body = { customer_share_hex: customerShareHex };
     if (poseidonKeyHash) body.poseidon_key_hash = poseidonKeyHash;
-
-    const resp = await fetch(`${baseUrl}/api/v1/prove/share-combination`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-API-Key": apiKey },
-        body: JSON.stringify(body),
+    return _apiCall(apiKey, "POST", "/api/v1/prove/share-combination", {
+        body, baseUrl,
     });
+}
+
+// ────────────────────────────────────────────────────────────────
+// Shared HTTP helper + Idempotency Map
+// ────────────────────────────────────────────────────────────────
+
+const DEFAULT_BASE_URL = "https://api.enyal.ai";
+
+/**
+ * Shared HTTP helper. All ENYAL API calls route through here.
+ *
+ * @param {string} apiKey - eyl_ API key
+ * @param {string} method - HTTP method (GET, POST, etc.)
+ * @param {string} path - API path (e.g., "/api/v1/archive")
+ * @param {Object} [opts]
+ * @param {Object} [opts.body] - Request body (POST/PUT)
+ * @param {URLSearchParams|Object} [opts.params] - Query parameters (GET)
+ * @param {string} [opts.baseUrl] - Base URL override
+ * @returns {Promise<Object>} Parsed JSON response
+ */
+async function _apiCall(apiKey, method, path, {
+    body = null, params = null, baseUrl = DEFAULT_BASE_URL,
+} = {}) {
+    let url = `${baseUrl}${path}`;
+    if (params) {
+        const qs = params instanceof URLSearchParams ? params : new URLSearchParams(params);
+        url = `${url}?${qs}`;
+    }
+
+    const headers = { "X-API-Key": apiKey };
+    const fetchOpts = { method, headers };
+    if (body !== null) {
+        headers["Content-Type"] = "application/json";
+        fetchOpts.body = JSON.stringify(body);
+    }
+
+    const resp = await fetch(url, fetchOpts);
     if (!resp.ok) {
-        const err = await resp.json().catch(() => ({ detail: resp.statusText }));
-        throw new Error(`Proof generation failed (${resp.status}): ${err.detail || JSON.stringify(err)}`);
+        const e = await resp.json().catch(() => ({}));
+        throw new Error(`API call failed (${resp.status}): ${e.detail || resp.statusText}`);
     }
     return resp.json();
 }
@@ -314,21 +341,16 @@ export async function requestShareProof(apiKey, baseUrl, customerShareHex, posei
 // API Wrappers — Core Operations
 // ────────────────────────────────────────────────────────────────
 
-const DEFAULT_BASE_URL = "https://api.enyal.ai";
-
 /**
  * Archive to ENYAL's immutable ledger.
  * @param {string} apiKey - eyl_ API key
  * @param {Object} opts - { agentId, chunkType, chunkKey, data, metadata?, baseUrl? }
  */
 export async function archive(apiKey, { agentId, chunkType, chunkKey, data, metadata = {}, baseUrl = DEFAULT_BASE_URL }) {
-    const resp = await fetch(`${baseUrl}/api/v1/archive`, {
-        method: "POST",
-        headers: { "X-API-Key": apiKey, "Content-Type": "application/json" },
-        body: JSON.stringify({ agent_id: agentId, chunk_type: chunkType, chunk_key: chunkKey, data, ...metadata }),
+    return _apiCall(apiKey, "POST", "/api/v1/archive", {
+        body: { agent_id: agentId, chunk_type: chunkType, chunk_key: chunkKey, data, ...metadata },
+        baseUrl,
     });
-    if (!resp.ok) { const e = await resp.json().catch(() => ({})); throw new Error(`Archive failed (${resp.status}): ${e.detail || resp.statusText}`); }
-    return resp.json();
 }
 
 /**
@@ -344,11 +366,7 @@ export async function search(apiKey, { query, chunkType, entity, since, until, l
     if (since) params.set("since", since);
     if (until) params.set("until", until);
     params.set("limit", limit);
-    const resp = await fetch(`${baseUrl}/api/v1/search?${params}`, {
-        headers: { "X-API-Key": apiKey },
-    });
-    if (!resp.ok) { const e = await resp.json().catch(() => ({})); throw new Error(`Search failed (${resp.status}): ${e.detail || resp.statusText}`); }
-    return resp.json();
+    return _apiCall(apiKey, "GET", "/api/v1/search", { params, baseUrl });
 }
 
 /**
@@ -359,13 +377,7 @@ export async function search(apiKey, { query, chunkType, entity, since, until, l
 export async function prove(apiKey, { resourceType, geographicRegion, quantumResistant = false, baseUrl = DEFAULT_BASE_URL }) {
     const body = { resource_type: resourceType, quantum_resistant: quantumResistant };
     if (geographicRegion) body.geographic_region = geographicRegion;
-    const resp = await fetch(`${baseUrl}/api/v1/prove`, {
-        method: "POST",
-        headers: { "X-API-Key": apiKey, "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-    });
-    if (!resp.ok) { const e = await resp.json().catch(() => ({})); throw new Error(`Prove failed (${resp.status}): ${e.detail || resp.statusText}`); }
-    return resp.json();
+    return _apiCall(apiKey, "POST", "/api/v1/prove", { body, baseUrl });
 }
 
 /**
@@ -374,13 +386,10 @@ export async function prove(apiKey, { resourceType, geographicRegion, quantumRes
  * @param {Object} opts - { chunkIds, recipientPubkeyHex, purpose, includeContentProof?, proofHashType?, baseUrl? }
  */
 export async function disclose(apiKey, { chunkIds, recipientPubkeyHex, purpose, includeContentProof = false, proofHashType = "poseidon", baseUrl = DEFAULT_BASE_URL }) {
-    const resp = await fetch(`${baseUrl}/api/v1/disclose`, {
-        method: "POST",
-        headers: { "X-API-Key": apiKey, "Content-Type": "application/json" },
-        body: JSON.stringify({ chunk_ids: chunkIds, recipient_pubkey_hex: recipientPubkeyHex, purpose, include_content_proof: includeContentProof, proof_hash_type: proofHashType }),
+    return _apiCall(apiKey, "POST", "/api/v1/disclose", {
+        body: { chunk_ids: chunkIds, recipient_pubkey_hex: recipientPubkeyHex, purpose, include_content_proof: includeContentProof, proof_hash_type: proofHashType },
+        baseUrl,
     });
-    if (!resp.ok) { const e = await resp.json().catch(() => ({})); throw new Error(`Disclose failed (${resp.status}): ${e.detail || resp.statusText}`); }
-    return resp.json();
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -395,13 +404,7 @@ export async function disclose(apiKey, { chunkIds, recipientPubkeyHex, purpose, 
 export async function timestamp(apiKey, { payload, description, baseUrl = DEFAULT_BASE_URL }) {
     const body = { payload };
     if (description) body.description = description;
-    const resp = await fetch(`${baseUrl}/api/v1/timestamp`, {
-        method: "POST",
-        headers: { "X-API-Key": apiKey, "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-    });
-    if (!resp.ok) { const e = await resp.json().catch(() => ({})); throw new Error(`Timestamp failed (${resp.status}): ${e.detail || resp.statusText}`); }
-    return resp.json();
+    return _apiCall(apiKey, "POST", "/api/v1/timestamp", { body, baseUrl });
 }
 
 /**
@@ -412,13 +415,7 @@ export async function timestamp(apiKey, { payload, description, baseUrl = DEFAUL
 export async function createAgreement(apiKey, { terms, parties, title, baseUrl = DEFAULT_BASE_URL }) {
     const body = { terms, parties };
     if (title) body.title = title;
-    const resp = await fetch(`${baseUrl}/api/v1/agreement/create`, {
-        method: "POST",
-        headers: { "X-API-Key": apiKey, "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-    });
-    if (!resp.ok) { const e = await resp.json().catch(() => ({})); throw new Error(`Agreement failed (${resp.status}): ${e.detail || resp.statusText}`); }
-    return resp.json();
+    return _apiCall(apiKey, "POST", "/api/v1/agreement/create", { body, baseUrl });
 }
 
 /**
@@ -427,13 +424,9 @@ export async function createAgreement(apiKey, { terms, parties, title, baseUrl =
  * @param {Object} opts - { agreementChunkId, terms, baseUrl? }
  */
 export async function verifyAgreement(apiKey, { agreementChunkId, terms, baseUrl = DEFAULT_BASE_URL }) {
-    const resp = await fetch(`${baseUrl}/api/v1/agreement/verify`, {
-        method: "POST",
-        headers: { "X-API-Key": apiKey, "Content-Type": "application/json" },
-        body: JSON.stringify({ agreement_chunk_id: agreementChunkId, terms }),
+    return _apiCall(apiKey, "POST", "/api/v1/agreement/verify", {
+        body: { agreement_chunk_id: agreementChunkId, terms }, baseUrl,
     });
-    if (!resp.ok) { const e = await resp.json().catch(() => ({})); throw new Error(`Verify agreement failed (${resp.status}): ${e.detail || resp.statusText}`); }
-    return resp.json();
 }
 
 /**
@@ -442,11 +435,7 @@ export async function verifyAgreement(apiKey, { agreementChunkId, terms, baseUrl
  * @param {Object} opts - { chunkId, baseUrl? }
  */
 export async function getLineage(apiKey, { chunkId, baseUrl = DEFAULT_BASE_URL }) {
-    const resp = await fetch(`${baseUrl}/api/v1/lineage/${chunkId}`, {
-        headers: { "X-API-Key": apiKey },
-    });
-    if (!resp.ok) { const e = await resp.json().catch(() => ({})); throw new Error(`Lineage failed (${resp.status}): ${e.detail || resp.statusText}`); }
-    return resp.json();
+    return _apiCall(apiKey, "GET", `/api/v1/lineage/${chunkId}`, { baseUrl });
 }
 
 /**
@@ -455,13 +444,10 @@ export async function getLineage(apiKey, { chunkId, baseUrl = DEFAULT_BASE_URL }
  * @param {Object} opts - { periodStart, periodEnd, systems, baseUrl? }
  */
 export async function complianceAttest(apiKey, { periodStart, periodEnd, systems, baseUrl = DEFAULT_BASE_URL }) {
-    const resp = await fetch(`${baseUrl}/api/v1/compliance/attest`, {
-        method: "POST",
-        headers: { "X-API-Key": apiKey, "Content-Type": "application/json" },
-        body: JSON.stringify({ period_start: periodStart, period_end: periodEnd, systems }),
+    return _apiCall(apiKey, "POST", "/api/v1/compliance/attest", {
+        body: { period_start: periodStart, period_end: periodEnd, systems },
+        baseUrl,
     });
-    if (!resp.ok) { const e = await resp.json().catch(() => ({})); throw new Error(`Compliance attest failed (${resp.status}): ${e.detail || resp.statusText}`); }
-    return resp.json();
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -476,13 +462,7 @@ export async function complianceAttest(apiKey, { periodStart, periodEnd, systems
 export async function sendMessage(apiKey, { senderAgentId, threadId, recipientAgentId, messageType, payload, expiresAt, baseUrl = DEFAULT_BASE_URL }) {
     const body = { sender_agent_id: senderAgentId, thread_id: threadId, recipient_agent_id: recipientAgentId, message_type: messageType, payload };
     if (expiresAt) body.expires_at = expiresAt;
-    const resp = await fetch(`${baseUrl}/api/v1/message/send`, {
-        method: "POST",
-        headers: { "X-API-Key": apiKey, "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-    });
-    if (!resp.ok) { const e = await resp.json().catch(() => ({})); throw new Error(`Send message failed (${resp.status}): ${e.detail || resp.statusText}`); }
-    return resp.json();
+    return _apiCall(apiKey, "POST", "/api/v1/message/send", { body, baseUrl });
 }
 
 /**
@@ -495,11 +475,7 @@ export async function getInbox(apiKey, { agentId, direction = 'inbox', threadId,
     if (threadId) params.set("thread_id", threadId);
     if (messageType) params.set("message_type", messageType);
     if (since) params.set("since", since);
-    const resp = await fetch(`${baseUrl}/api/v1/message/inbox?${params}`, {
-        headers: { "X-API-Key": apiKey },
-    });
-    if (!resp.ok) { const e = await resp.json().catch(() => ({})); throw new Error(`Get inbox failed (${resp.status}): ${e.detail || resp.statusText}`); }
-    return resp.json();
+    return _apiCall(apiKey, "GET", "/api/v1/message/inbox", { params, baseUrl });
 }
 
 /**
@@ -508,11 +484,7 @@ export async function getInbox(apiKey, { agentId, direction = 'inbox', threadId,
  * @param {Object} opts - { threadId, baseUrl? }
  */
 export async function getThread(apiKey, { threadId, baseUrl = DEFAULT_BASE_URL }) {
-    const resp = await fetch(`${baseUrl}/api/v1/message/thread/${threadId}`, {
-        headers: { "X-API-Key": apiKey },
-    });
-    if (!resp.ok) { const e = await resp.json().catch(() => ({})); throw new Error(`Get thread failed (${resp.status}): ${e.detail || resp.statusText}`); }
-    return resp.json();
+    return _apiCall(apiKey, "GET", `/api/v1/message/thread/${threadId}`, { baseUrl });
 }
 
 /**
@@ -521,13 +493,9 @@ export async function getThread(apiKey, { threadId, baseUrl = DEFAULT_BASE_URL }
  * @param {Object} opts - { messageIds, baseUrl? }
  */
 export async function markRead(apiKey, { messageIds, baseUrl = DEFAULT_BASE_URL }) {
-    const resp = await fetch(`${baseUrl}/api/v1/message/read`, {
-        method: "POST",
-        headers: { "X-API-Key": apiKey, "Content-Type": "application/json" },
-        body: JSON.stringify({ message_ids: messageIds }),
+    return _apiCall(apiKey, "POST", "/api/v1/message/read", {
+        body: { message_ids: messageIds }, baseUrl,
     });
-    if (!resp.ok) { const e = await resp.json().catch(() => ({})); throw new Error(`Mark read failed (${resp.status}): ${e.detail || resp.statusText}`); }
-    return resp.json();
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -539,69 +507,33 @@ export async function getKnowledgeNodes(apiKey, { nodeType, search, limit = 50, 
     if (nodeType) params.set("node_type", nodeType);
     if (search) params.set("search", search);
     params.set("limit", limit);
-    const resp = await fetch(`${baseUrl}/api/v1/knowledge/nodes?${params}`, {
-        headers: { "X-API-Key": apiKey },
-    });
-    if (!resp.ok) { const e = await resp.json().catch(() => ({})); throw new Error(`Knowledge nodes failed (${resp.status}): ${e.detail || resp.statusText}`); }
-    return resp.json();
+    return _apiCall(apiKey, "GET", "/api/v1/knowledge/nodes", { params, baseUrl });
 }
 
 export async function getKnowledgeNode(apiKey, { nodeId, baseUrl = DEFAULT_BASE_URL }) {
-    const resp = await fetch(`${baseUrl}/api/v1/knowledge/node/${nodeId}`, {
-        headers: { "X-API-Key": apiKey },
-    });
-    if (!resp.ok) { const e = await resp.json().catch(() => ({})); throw new Error(`Knowledge node failed (${resp.status}): ${e.detail || resp.statusText}`); }
-    return resp.json();
+    return _apiCall(apiKey, "GET", `/api/v1/knowledge/node/${nodeId}`, { baseUrl });
 }
 
 export async function getKnowledgeConnections(apiKey, { nodeId, hops = 2, baseUrl = DEFAULT_BASE_URL }) {
-    const resp = await fetch(`${baseUrl}/api/v1/knowledge/node/${nodeId}/connections?hops=${hops}`, {
-        headers: { "X-API-Key": apiKey },
+    return _apiCall(apiKey, "GET", `/api/v1/knowledge/node/${nodeId}/connections`, {
+        params: new URLSearchParams({ hops }), baseUrl,
     });
-    if (!resp.ok) { const e = await resp.json().catch(() => ({})); throw new Error(`Knowledge connections failed (${resp.status}): ${e.detail || resp.statusText}`); }
-    return resp.json();
 }
 
 export async function getContradictions(apiKey, { baseUrl = DEFAULT_BASE_URL } = {}) {
-    const resp = await fetch(`${baseUrl}/api/v1/knowledge/contradictions`, {
-        headers: { "X-API-Key": apiKey },
-    });
-    if (!resp.ok) { const e = await resp.json().catch(() => ({})); throw new Error(`Contradictions failed (${resp.status}): ${e.detail || resp.statusText}`); }
-    return resp.json();
+    return _apiCall(apiKey, "GET", "/api/v1/knowledge/contradictions", { baseUrl });
 }
 
 export async function getKnowledgeStats(apiKey, { baseUrl = DEFAULT_BASE_URL } = {}) {
-    const resp = await fetch(`${baseUrl}/api/v1/knowledge/stats`, {
-        headers: { "X-API-Key": apiKey },
-    });
-    if (!resp.ok) { const e = await resp.json().catch(() => ({})); throw new Error(`Knowledge stats failed (${resp.status}): ${e.detail || resp.statusText}`); }
-    return resp.json();
+    return _apiCall(apiKey, "GET", "/api/v1/knowledge/stats", { baseUrl });
 }
 
-/**
- * Get a grouped overview of the knowledge base with connection counts.
- * Returns nodes grouped by type, plus contradictions, totals, and last_updated.
- * Results are cached server-side for 60 seconds.
- */
 export async function getKnowledgeIndex(apiKey, { baseUrl = DEFAULT_BASE_URL } = {}) {
-    const resp = await fetch(`${baseUrl}/api/v1/knowledge/index`, {
-        headers: { "X-API-Key": apiKey },
-    });
-    if (!resp.ok) { const e = await resp.json().catch(() => ({})); throw new Error(`Knowledge index failed (${resp.status}): ${e.detail || resp.statusText}`); }
-    return resp.json();
+    return _apiCall(apiKey, "GET", "/api/v1/knowledge/index", { baseUrl });
 }
 
-/**
- * Get knowledge base health assessment.
- * Returns status ('healthy'|'needs_attention'|'unhealthy'), contradictions,
- * orphan_nodes, gaps, stale_nodes, and suggested_actions.
- */
 export async function getKnowledgeHealth(apiKey, { baseUrl = DEFAULT_BASE_URL } = {}) {
-    const resp = await fetch(`${baseUrl}/api/v1/knowledge/health`, {
-        headers: { "X-API-Key": apiKey },
-    });
-    if (!resp.ok) { const e = await resp.json().catch(() => ({})); throw new Error(`Knowledge health failed (${resp.status}): ${e.detail || resp.statusText}`); }
-    return resp.json();
+    return _apiCall(apiKey, "GET", "/api/v1/knowledge/health", { baseUrl });
 }
 
 /**
@@ -614,13 +546,9 @@ export async function getKnowledgeHealth(apiKey, { baseUrl = DEFAULT_BASE_URL } 
  * @returns {Promise<{id, name, node_type, summary, source_nodes, edges_created, cost}>}
  */
 export async function synthesiseKnowledge(apiKey, { query, nodeIds, baseUrl = DEFAULT_BASE_URL }) {
-    const resp = await fetch(`${baseUrl}/api/v1/knowledge/synthesise`, {
-        method: "POST",
-        headers: { "X-API-Key": apiKey, "Content-Type": "application/json" },
-        body: JSON.stringify({ query, node_ids: nodeIds }),
+    return _apiCall(apiKey, "POST", "/api/v1/knowledge/synthesise", {
+        body: { query, node_ids: nodeIds }, baseUrl,
     });
-    if (!resp.ok) { const e = await resp.json().catch(() => ({})); throw new Error(`Synthesis failed (${resp.status}): ${e.detail || resp.statusText}`); }
-    return resp.json();
 }
 
 // ────────────────────────────────────────────────────────────────

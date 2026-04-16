@@ -1,5 +1,3 @@
-'use strict';
-
 /**
  * ENYAL Local Knowledge Graph — on-device SQLite knowledge store.
  *
@@ -10,11 +8,11 @@
  * Node.js >= 18.7.0 (for crypto.randomUUID)
  */
 
-const Database = require('better-sqlite3');
-const crypto = require('crypto');
-const path = require('path');
-const os = require('os');
-const fs = require('fs');
+import Database from 'better-sqlite3';
+import crypto from 'node:crypto';
+import path from 'node:path';
+import os from 'node:os';
+import fs from 'node:fs';
 
 const SUFFIXES = [' ltd', ' inc', ' gmbh', ' limited', ' corp'];
 
@@ -457,4 +455,4 @@ class LocalKnowledgeGraph {
     }
 }
 
-module.exports = { LocalKnowledgeGraph };
+export { LocalKnowledgeGraph };

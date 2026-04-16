@@ -2,12 +2,36 @@
   "name": "enyal-sdk",
   "version": "2.0.0",
   "description": "ENYAL SDK \u2014 encrypted knowledge graph, local memory, permanent proof",
-  "main": "index.js",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "exports": {
+    ".": {
+      "import": "./index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./enyal-client.js": {
+      "import": "./enyal-client.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "files": [
+    "index.js",
+    "enyal-client.js",
+    "enyal_agent.js",
+    "local_knowledge.js",
+    "dist/",
+    "README.md",
+    "LICENSE"
+  ],
   "engines": {
     "node": ">=18.7.0"
   },
   "dependencies": {
     "better-sqlite3": "^11.0.0"
+  },
+  "scripts": {
+    "build": "esbuild index.js --bundle --platform=node --format=cjs --outfile=dist/index.cjs --external:better-sqlite3",
+    "prepublishOnly": "npm run build"
   },
   "keywords": [
     "enyal",
